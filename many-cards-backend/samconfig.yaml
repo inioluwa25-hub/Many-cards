@@ -1,0 +1,33 @@
+version: 0.1
+
+# Default environment (Staging)
+default:
+  deploy:
+    parameters:
+      capabilities:
+        - "CAPABILITY_IAM"
+        - "CAPABILITY_AUTO_EXPAND"
+        - "CAPABILITY_NAMED_IAM"
+      confirm_changeset: false
+      stack_name: "many-cards-staging"
+      region: "us-east-1"
+      resolve_s3: true
+      s3_prefix: "many-cards-staging"
+      parameter_overrides: >
+        Stage=staging
+
+# Production environment
+prod:
+  deploy:
+    parameters:
+      capabilities:
+        - "CAPABILITY_IAM"
+        - "CAPABILITY_AUTO_EXPAND"
+        - "CAPABILITY_NAMED_IAM"
+      confirm_changeset: false
+      stack_name: "many-cards-prod"
+      region: "us-east-1"
+      resolve_s3: true
+      s3_prefix: "many-cards-prod"
+      parameter_overrides: >
+        Stage=prod
