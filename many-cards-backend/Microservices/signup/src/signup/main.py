@@ -119,12 +119,10 @@ def main(event, context=None):
         #         },
         #     )
 
-        e164_phone = "+234" + payload.phone_number[1:]
         user_attr = [
             {"Name": "email", "Value": payload.email},
             {"Name": "given_name", "Value": payload.first_name},
             {"Name": "family_name", "Value": payload.last_name},
-            {"Name": "phone_number", "Value": e164_phone},
         ]
 
         client.sign_up(
@@ -133,15 +131,12 @@ def main(event, context=None):
             Username=payload.email,
             Password=payload.password,
             UserAttributes=user_attr,
+            ValidationData=[{"Name": "email", "Value": payload.email}],
         )
-
-        response = {
-            "error": False,
-            "success": True,
-            "message": "User created and automatically confirmed",
-            "data": {"email": payload.email, "status": "CONFIRMED"},
-        }
         status_code = 200
+        response["error"] = False
+        response["success"] = True
+        response["message"] = "please confirm signup"
 
     except client.exceptions.UsernameExistsException as e:
         logger.error(e)

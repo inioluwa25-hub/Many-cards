@@ -16,7 +16,7 @@ logger = Logger()
 context = logging.getLogger()
 
 db = boto3.resource("dynamodb")
-table = db.Table("chow-tap-prod-main-table")
+table = db.Table("many-cards-prod-main-table")
 
 response = {
     "statusCode": 500,
