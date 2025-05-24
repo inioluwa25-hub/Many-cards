@@ -162,7 +162,7 @@ Resources:
   ListAllCardsFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-get-card-function"
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-list-all-cards-function"
       Handler: main.handler
       CodeUri: ./src/list-all-cards/
       Role: !GetAtt GenerateCardServiceRole.Arn
