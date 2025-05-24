@@ -153,7 +153,7 @@ Resources:
           Type: Api
           Properties:
             Path: /get-card
-            Method: GET
+            Method: POST
             RestApiId: !Ref GenerateCardApi
             Auth:
               Authorizer: CognitoAuthorizer
