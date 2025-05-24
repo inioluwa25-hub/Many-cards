@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: AWS SAM template for Residence on the application with Cognito Authorizer
+
+Parameters:
+  AppName:
+    Type: String
+  Stage:
+    Type: String
+  ServiceName:
+    Type: String
+  AwsLambdaPowertoolsPythonLayer:
+    Type: String
+    
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 1024
+    Layers:
+      - !Ref PythonRequirementsLayer
+      - !Ref UtilsLayer
+      - !Ref AwsLambdaPowertoolsPythonLayer
+    Runtime: python3.10
+    Tracing: Active
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        APP_NAME: !Ref AppName
+        STAGE: !Ref Stage
+
+Resources:
+  GenerateCardServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-${Stage}-${ServiceName}-generate-card-role"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AWSLambdaExecute"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${AppName}-${Stage}-${ServiceName}-generate-card-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Cognito permissions
+              - Effect: Allow
+                Action:
+                  - cognito-idp:InitiateAuth
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminUpdateUserAttributes
+                  - cognito-idp:ListUsers
+                  - cognito-idp:RespondToAuthChallenge
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminDisableUser
+                Resource: "*"
+              
+              # SSM Parameter Store permissions
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/POOL_ID"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/CLIENT_ID"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/CLIENT_SECRET"
+              
+              # KMS permissions
+              - Effect: Allow 
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: 
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:key/96493165-47c2-463c-b26a-8df9cbe0139d"
+              
+              # DynamoDB permissions
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: 
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/many-cards-${Stage}-main-table"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/many-cards-${Stage}-main-table/index/*"
+
+  GenerateCardApiGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-${Stage}-${ServiceName}-api-gateway-role"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/CloudWatchFullAccess"
+        - "arn:aws:iam::aws:policy/AWSLambdaExecute"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "${AppName}-${Stage}-${ServiceName}-api-gateway-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: 
+                  - !GetAtt GenerateMainCardFunction.Arn
+
+  GenerateMainCardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-generate-main-card-function"
+      Handler: main.handler
+      CodeUri: ./src/generate-main-card/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: Generate card on the application
+      Events:
+        GenerateMainCard:
+          Type: Api
+          Properties:
+            Path: /generate-card
+            Method: POST
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  GenerateCardApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Name: !Sub "${AppName}-${Stage}-${ServiceName}-generate-card-api"
+      TracingEnabled: true
+      EndpointConfiguration: REGIONAL
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/us-east-1_wpw2NMAEn
+            Identity:
+              Header: "Authorization"
+      Cors:
+        AllowMethods: "'GET,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent,X-Amzn-Trace-Id'"
+        AllowOrigin: "'*'"
+
+  PythonRequirementsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AppName}-${Stage}-${ServiceName}-python-requirements"
+      Description: Dependencies for the auth service Lambda function
+      ContentUri: dependencies/requirements/
+      CompatibleRuntimes:
+        - python3.9
+      LicenseInfo: MIT
+    Metadata:
+      BuildMethod: python3.10
+
+  UtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AppName}-${Stage}-${ServiceName}-utils-layer"
+      Description: Utility functions for Lambda
+      ContentUri: ./dependencies/utils/
+    Metadata:
+      BuildMethod: python3.10
+  
+  GenerateMainCardFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${GenerateMainCardFunction}"
+      RetentionInDays: 14
+
+Outputs:
+  GenerateMainCardFunctionArn:
+    Description: "Generate Main Card Function ARN"
+    Value: !GetAtt GenerateMainCardFunction.Arn
+  GenerateCardApiEndpoint:
+    Description: "Generate Card API Endpoint URL"
+    Value: !Sub "https://${GenerateCardApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
