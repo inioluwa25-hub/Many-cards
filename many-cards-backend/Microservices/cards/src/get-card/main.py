@@ -1,8 +1,5 @@
 from decimal import Decimal
-from uuid import uuid4
 from utils import make_response, handle_exceptions, logger
-import datetime
-from dataclasses import asdict
 import json
 import boto3
 from botocore.exceptions import ClientError
@@ -15,15 +12,55 @@ kms = boto3.client("kms")
 def _decrypt_card_details(encrypted_card_number: bytes, encrypted_cvv: bytes) -> dict:
     """Decrypt sensitive card details using KMS"""
     try:
-        decrypted_number = kms.decrypt(CiphertextBlob=encrypted_card_number)[
-            "Plaintext"
-        ].decode()
+        # Ensure we have bytes objects
+        if not isinstance(encrypted_card_number, bytes):
+            encrypted_card_number = bytes(encrypted_card_number)
+        if not isinstance(encrypted_cvv, bytes):
+            encrypted_cvv = bytes(encrypted_cvv)
 
-        decrypted_cvv = kms.decrypt(CiphertextBlob=encrypted_cvv)["Plaintext"].decode()
+        # Decrypt card number
+        try:
+            decrypted_number_response = kms.decrypt(
+                CiphertextBlob=encrypted_card_number
+            )
+            decrypted_number = decrypted_number_response["Plaintext"]
+
+            # Handle both bytes and string responses
+            if isinstance(decrypted_number, bytes):
+                decrypted_number = decrypted_number.decode("utf-8")
+        except ClientError as e:
+            logger.error(
+                f"Failed to decrypt card number: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+            )
+            raise Exception("Failed to decrypt card number")
+        except UnicodeDecodeError as e:
+            logger.error(f"Failed to decode decrypted card number: {str(e)}")
+            raise Exception("Failed to decode decrypted card number")
+
+        # Decrypt CVV
+        try:
+            decrypted_cvv_response = kms.decrypt(CiphertextBlob=encrypted_cvv)
+            decrypted_cvv = decrypted_cvv_response["Plaintext"]
+
+            # Handle both bytes and string responses
+            if isinstance(decrypted_cvv, bytes):
+                decrypted_cvv = decrypted_cvv.decode("utf-8")
+        except ClientError as e:
+            logger.error(
+                f"Failed to decrypt CVV: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+            )
+            raise Exception("Failed to decrypt CVV")
+        except UnicodeDecodeError as e:
+            logger.error(f"Failed to decode decrypted CVV: {str(e)}")
+            raise Exception("Failed to decode decrypted CVV")
 
         return {"number": decrypted_number, "cvv": decrypted_cvv}
-    except ClientError as e:
-        raise Exception(f"Decryption failed: {str(e)}")
+
+    except Exception as e:
+        # Safely handle the error without exposing sensitive data
+        error_msg = str(e) if hasattr(e, "__str__") else "Decryption failed"
+        logger.error(f"Decryption error: {error_msg}")
+        raise Exception("Decryption failed")
 
 
 @logger.inject_lambda_context(log_event=True)
@@ -87,7 +124,9 @@ def main(event, context=None):
         try:
             response = table.get_item(Key={"pk": f"USER#{user_id}", "sk": card_id})
         except ClientError as e:
-            logger.error(f"DynamoDB error: {str(e)}")
+            logger.error(
+                f"DynamoDB error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+            )
             return make_response(
                 500,
                 {
@@ -127,10 +166,26 @@ def main(event, context=None):
                 },
             )
 
+        # Validate encrypted data exists
+        encrypted_card_number = card_item.get("encrypted_card_number")
+        encrypted_cvv = card_item.get("encrypted_cvv")
+
+        if not encrypted_card_number or not encrypted_cvv:
+            logger.error(f"Missing encrypted data for card {card_id}")
+            return make_response(
+                500,
+                {
+                    "error": True,
+                    "success": False,
+                    "message": "Card data incomplete",
+                    "data": None,
+                },
+            )
+
         # Decrypt card details
         try:
             decrypted_details = _decrypt_card_details(
-                card_item["encrypted_card_number"], card_item["encrypted_cvv"]
+                encrypted_card_number, encrypted_cvv
             )
         except Exception as e:
             logger.error(f"Decryption failed for card {card_id}: {str(e)}")
@@ -146,7 +201,7 @@ def main(event, context=None):
 
         # Prepare response data
         response_data = {
-            "card_id": card_item.get("card_id"),
+            "card_id": card_item.get("sk"),
             "user_id": user_id,
             "currency": card_item.get("currency"),
             "card_type": card_item.get("card_type"),
@@ -155,7 +210,6 @@ def main(event, context=None):
             "is_active": card_item.get("is_active", False),
             "created_at": card_item.get("created_at"),
             "balance": float(card_item.get("balance", Decimal("0.00"))),
-            "masked_number": card_item.get("masked_number"),
             "full_number": decrypted_details.get("number"),
             "cvv": decrypted_details.get("cvv"),
         }
