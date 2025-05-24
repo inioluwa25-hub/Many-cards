@@ -72,3 +72,13 @@ Resources:
         Stage: !Ref Stage
         ServiceName: "forgot-password"
         AwsLambdaPowertoolsPythonLayer: !GetAtt AwsLambdaPowertoolsPythonLayer.Outputs.LayerVersionArn
+
+  CardService:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: Microservices/cards/template.yml
+      Parameters:
+        AppName: !Ref AppName
+        Stage: !Ref Stage
+        ServiceName: "cards"
+        AwsLambdaPowertoolsPythonLayer: !GetAtt AwsLambdaPowertoolsPythonLayer.Outputs.LayerVersionArn
