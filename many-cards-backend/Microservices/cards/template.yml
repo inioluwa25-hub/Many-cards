@@ -121,6 +121,7 @@ Resources:
                 Resource: 
                   - !GetAtt GenerateMainCardFunction.Arn
                   - !GetAtt GetCardFunction.Arn
+                  - !GetAtt ListAllCardsFunction.Arn
 
   GenerateMainCardFunction:
     Type: AWS::Serverless::Function
@@ -149,11 +150,29 @@ Resources:
       Role: !GetAtt GenerateCardServiceRole.Arn
       Description: Get card on the application
       Events:
-        GenerateMainCard:
+        GetCard:
           Type: Api
           Properties:
             Path: /get-card
             Method: POST
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+    
+  ListAllCardsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-get-card-function"
+      Handler: main.handler
+      CodeUri: ./src/list-all-cards/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: List all cards on the application
+      Events:
+        ListAllCards:
+          Type: Api
+          Properties:
+            Path: /list-all-cards
+            Method: GET
             RestApiId: !Ref GenerateCardApi
             Auth:
               Authorizer: CognitoAuthorizer
@@ -203,12 +222,18 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/${GenerateMainCardFunction}"
       RetentionInDays: 14
+
   GetCardFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${GetCardFunction}"
       RetentionInDays: 14
 
+  ListAllCardsFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ListAllCardsFunction}"
+      RetentionInDays: 14
 
 Outputs:
   GenerateMainCardFunctionArn:
@@ -217,6 +242,9 @@ Outputs:
   GetCardFunctionArn:
     Description: "Get Card Function ARN"
     Value: !GetAtt GetCardFunction.Arn
+  ListAllCardsFunctionArn:
+    Description: "List All Cards Function ARN"
+    Value: !GetAtt ListAllCardsFunction.Arn
   GenerateCardApiEndpoint:
     Description: "Generate Card API Endpoint URL"
     Value: !Sub "https://${GenerateCardApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"

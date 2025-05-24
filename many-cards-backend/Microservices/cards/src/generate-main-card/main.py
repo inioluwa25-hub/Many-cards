@@ -183,20 +183,62 @@ def main(event, context=None):
                 },
             )
 
-        # Generate card details
         currency = body["currency"].lower()
         network = body.get("card_network", "visa").lower()
 
+        # Check for existing card of the same currency
+        try:
+            response = table.query(
+                KeyConditionExpression="pk = :pk AND begins_with(sk, :sk_prefix)",
+                ExpressionAttributeValues={
+                    ":pk": f"USER#{user_id}",
+                    ":sk_prefix": "CARD#",
+                },
+            )
+
+            existing_cards = response.get("Items", [])
+
+            # Check if user already has a card with this currency
+            for card in existing_cards:
+                if card.get("currency", "").lower() == currency and card.get(
+                    "is_active", True
+                ):
+                    return make_response(
+                        400,
+                        {
+                            "error": True,
+                            "success": False,
+                            "message": f"User already has an active {currency} card",
+                            "data": {
+                                "existing_card_id": card.get("sk").replace("CARD#", ""),
+                                "currency": currency,
+                            },
+                        },
+                    )
+
+        except ClientError as e:
+            logger.error(f"DynamoDB query error: {str(e)}")
+            return make_response(
+                500,
+                {
+                    "error": True,
+                    "success": False,
+                    "message": "Error checking existing cards",
+                    "data": None,
+                },
+            )
+
+        # Generate card details
         card = CardGenerator.generate_card(currency, network)
 
         # Encrypt sensitive data
         encrypted_card = _encrypt_card_details(card)
 
         # Store in DynamoDB
-        # In your main function, modify the card_item creation:
+        card_id = f"CARD#{str(uuid4())[:8]}"
         card_item = {
-            "pk": f"USER#{user_id}",  # Partition key
-            "sk": f"CARD#{str(uuid4())[:8]}",  # Sort key
+            "pk": f"USER#{user_id}",
+            "sk": card_id,
             "user_id": user_id,
             **asdict(card),
             "encrypted_card_number": encrypted_card["number"],
@@ -221,7 +263,7 @@ def main(event, context=None):
                 "success": True,
                 "message": "Card generated successfully",
                 "data": {
-                    "card_id": card_item["sk"],
+                    "card_id": card_id,
                     "user_id": user_id,
                     "currency": currency,
                     "card_type": card.card_type,
@@ -230,9 +272,7 @@ def main(event, context=None):
                     "expiry": card.expiry,
                     "is_active": True,
                     "created_at": card_item["created_at"],
-                    "balance": float(
-                        card_item["balance"]
-                    ),  # Convert back to float for JSON
+                    "balance": float(card_item["balance"]),
                 },
             },
         )
