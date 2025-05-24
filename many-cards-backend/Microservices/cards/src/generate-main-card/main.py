@@ -5,7 +5,7 @@ import datetime
 from dataclasses import dataclass
 import json
 import boto3
-from card_generator import CardGenerator, CardDetails
+from decimal import Decimal  # Add this import
 from dataclasses import asdict
 from botocore.exceptions import ClientError
 
@@ -130,13 +130,6 @@ def _mask_card_number(number: str) -> str:
     return number[:4] + "*" * (len(number) - 8) + number[-4:]
 
 
-def _generate_uuid() -> str:
-    """Generate a short UUID"""
-    import uuid
-
-    return str(uuid.uuid4())[:8]
-
-
 @logger.inject_lambda_context(log_event=True)
 @handle_exceptions
 def main(event, context=None):
@@ -200,15 +193,22 @@ def main(event, context=None):
         encrypted_card = _encrypt_card_details(card)
 
         # Store in DynamoDB
+        # In your main function, modify the card_item creation:
         card_item = {
-            "user_id": user_id,  # Use the user_id from claims
-            "card_id": f"card_{str(uuid4())[:8]}",
+            "pk": f"USER#{user_id}",  # Partition key
+            "sk": f"CARD#{str(uuid4())[:8]}",  # Sort key
+            "user_id": user_id,
             **asdict(card),
             "encrypted_card_number": encrypted_card["number"],
             "encrypted_cvv": encrypted_card["cvv"],
             "is_active": True,
             "created_at": datetime.datetime.now().isoformat(),
-            "balance": 0.00,
+            "balance": Decimal("0.00"),
+            "currency": currency,
+            "card_type": card.card_type,
+            "network": card.network,
+            "expiry": card.expiry,
+            "masked_number": _mask_card_number(card.number),
         }
 
         table.put_item(Item=card_item)
@@ -221,7 +221,7 @@ def main(event, context=None):
                 "success": True,
                 "message": "Card generated successfully",
                 "data": {
-                    "card_id": card_item["card_id"],
+                    "card_id": card_item["sk"],
                     "user_id": user_id,
                     "currency": currency,
                     "card_type": card.card_type,
@@ -230,6 +230,9 @@ def main(event, context=None):
                     "expiry": card.expiry,
                     "is_active": True,
                     "created_at": card_item["created_at"],
+                    "balance": float(
+                        card_item["balance"]
+                    ),  # Convert back to float for JSON
                 },
             },
         )

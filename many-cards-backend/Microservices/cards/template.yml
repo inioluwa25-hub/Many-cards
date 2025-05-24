@@ -120,6 +120,7 @@ Resources:
                 Action: lambda:InvokeFunction
                 Resource: 
                   - !GetAtt GenerateMainCardFunction.Arn
+                  - !GetAtt GetCardFunction.Arn
 
   GenerateMainCardFunction:
     Type: AWS::Serverless::Function
@@ -135,6 +136,24 @@ Resources:
           Properties:
             Path: /generate-card
             Method: POST
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  GetCardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-get-card-function"
+      Handler: main.handler
+      CodeUri: ./src/get-card/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: Get card on the application
+      Events:
+        GenerateMainCard:
+          Type: Api
+          Properties:
+            Path: /get-card
+            Method: GET
             RestApiId: !Ref GenerateCardApi
             Auth:
               Authorizer: CognitoAuthorizer
@@ -184,11 +203,20 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/${GenerateMainCardFunction}"
       RetentionInDays: 14
+  GetCardFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${GetCardFunction}"
+      RetentionInDays: 14
+
 
 Outputs:
   GenerateMainCardFunctionArn:
     Description: "Generate Main Card Function ARN"
     Value: !GetAtt GenerateMainCardFunction.Arn
+  GetCardFunctionArn:
+    Description: "Get Card Function ARN"
+    Value: !GetAtt GetCardFunction.Arn
   GenerateCardApiEndpoint:
     Description: "Generate Card API Endpoint URL"
     Value: !Sub "https://${GenerateCardApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
