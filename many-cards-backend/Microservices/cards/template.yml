@@ -120,6 +120,7 @@ Resources:
                 Action: lambda:InvokeFunction
                 Resource: 
                   - !GetAtt GenerateMainCardFunction.Arn
+                  - !GetAtt CreateSubCardFunction.Arn
                   - !GetAtt GetCardFunction.Arn
                   - !GetAtt ListAllCardsFunction.Arn
 
@@ -136,6 +137,24 @@ Resources:
           Type: Api
           Properties:
             Path: /generate-card
+            Method: POST
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  CreateSubCardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-create-sub-card-function"
+      Handler: main.handler
+      CodeUri: ./src/create-sub-card/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: Create sub card on the application
+      Events:
+        CreateSubCard:
+          Type: Api
+          Properties:
+            Path: /create-sub-card
             Method: POST
             RestApiId: !Ref GenerateCardApi
             Auth:
@@ -223,6 +242,12 @@ Resources:
       LogGroupName: !Sub "/aws/lambda/${GenerateMainCardFunction}"
       RetentionInDays: 14
 
+  CreateSubCardFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CreateSubCardFunction}"
+      RetentionInDays: 14
+
   GetCardFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -239,6 +264,9 @@ Outputs:
   GenerateMainCardFunctionArn:
     Description: "Generate Main Card Function ARN"
     Value: !GetAtt GenerateMainCardFunction.Arn
+  CreateSubCardFunctionArn:
+    Description: "Create Sub Card Function ARN"
+    Value: !GetAtt CreateSubCardFunction.Arn
   GetCardFunctionArn:
     Description: "Get Card Function ARN"
     Value: !GetAtt GetCardFunction.Arn
