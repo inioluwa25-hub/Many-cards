@@ -70,6 +70,7 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/POOL_ID"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/CLIENT_ID"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/CLIENT_SECRET"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/EXCHANGE_API_KEY"
               
               # KMS permissions
               - Effect: Allow 
@@ -123,6 +124,7 @@ Resources:
                   - !GetAtt CreateSubCardFunction.Arn
                   - !GetAtt GetCardFunction.Arn
                   - !GetAtt ListAllCardsFunction.Arn
+                  - !GetAtt CurrencyConverterFunction.Arn
 
   GenerateMainCardFunction:
     Type: AWS::Serverless::Function
@@ -159,6 +161,24 @@ Resources:
             RestApiId: !Ref GenerateCardApi
             Auth:
               Authorizer: CognitoAuthorizer
+
+  CurrencyConverterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-currency-converter-function"
+      Handler: main.handler
+      CodeUri: ./src/currency-converter/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: Converts currency on the application
+      Events:
+        CurrencyConverter:
+          Type: Api
+          Properties:
+            Path: /convert
+            Method: POST
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: None
 
   GetCardFunction:
     Type: AWS::Serverless::Function
@@ -248,6 +268,12 @@ Resources:
       LogGroupName: !Sub "/aws/lambda/${CreateSubCardFunction}"
       RetentionInDays: 14
 
+  CurrencyConverterFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CurrencyConverterFunction}"
+      RetentionInDays: 14
+
   GetCardFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -267,6 +293,9 @@ Outputs:
   CreateSubCardFunctionArn:
     Description: "Create Sub Card Function ARN"
     Value: !GetAtt CreateSubCardFunction.Arn
+  CurrencyConverterFunctionArn:
+    Description: "Convert Currency Function ARN"
+    Value: !GetAtt CurrencyConverterFunction.Arn
   GetCardFunctionArn:
     Description: "Get Card Function ARN"
     Value: !GetAtt GetCardFunction.Arn
