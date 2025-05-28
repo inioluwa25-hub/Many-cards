@@ -26,15 +26,15 @@ class CardDetails:
 class CardGenerator:
     # BIN ranges for different card types and currencies
     BIN_RANGES = {
-        "naira": {
+        "NGN": {
             "visa": ["4", "47"],
             "mastercard": ["51", "52", "53", "54", "55", "2221", "2222", "2223"],
         },
-        "dollar": {
+        "USD": {
             "visa": ["4"],
             "mastercard": ["51", "52", "53", "54", "55", "2221", "2222", "2223"],
         },
-        "pound": {
+        "GBP": {
             "visa": ["4"],
             "mastercard": ["51", "52", "53", "54", "55", "2221", "2222", "2223"],
         },
