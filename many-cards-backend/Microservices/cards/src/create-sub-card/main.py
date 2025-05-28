@@ -2,11 +2,12 @@ import json
 from os import getenv
 from time import time
 from uuid import uuid4
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import boto3
 from aws_lambda_powertools.utilities import parameters
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from utils import handle_exceptions, logger, make_response
 
 # Environment variables
@@ -29,9 +30,27 @@ table = db.Table("many-cards-prod-main-table")
 class SubCardPayload(BaseModel):
     main_card_id: str
     color: str
+    merchant_id: str
     name: str
+    start_date: str | None = None
+    duration_days: int | None = None
     spending_limit: int
     resume: bool
+
+    @validator("start_date")
+    def validate_start_date(cls, v):
+        if v:
+            try:
+                datetime.fromisoformat(v)
+            except ValueError:
+                raise ValueError("Invalid date format. Use YYYY-MM-DD")
+        return v
+
+    @validator("duration_days")
+    def validate_duration(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("Duration must be positive")
+        return v
 
 
 def validate_hex_color(color: str) -> bool:
@@ -123,6 +142,19 @@ def main(event, context=None):
                 404, {"error": True, "message": "Parent card not found"}
             )
 
+        current_time = datetime.now()
+        expiration_date = None
+
+        if payload.duration_days:
+            if payload.start_date:
+                start_date = datetime.fromisoformat(payload.start_date)
+            else:
+                start_date = current_time
+
+            expiration_date = (
+                start_date + timedelta(days=payload.duration_days)
+            ).isoformat()
+
         # Create sub-card
         sub_card_id = f"SUB#{str(uuid4())[:8]}"
 
@@ -132,18 +164,25 @@ def main(event, context=None):
             "type": "SUB_CARD",
             "name": payload.name,
             "color": payload.color,
+            "merchant_id": payload.merchant_id,
             "spending_limit": Decimal(str(payload.spending_limit)),
+            "current_spend": Decimal("0.00"),
             "status": payload.resume,
             "created_at": int(time()),
             "updated_at": int(time()),
+            "duration_days": payload.duration_days,
+            "start_date": payload.start_date or current_time.isoformat(),
+            "expiration_date": expiration_date,
             "main_card_id": payload.main_card_id,
             "GSI1PK": payload.main_card_id,  # For querying by parent card
             "GSI1SK": f"SUB#{sub_card_id}",
         }
-        table.put_item(Item=sub_card)
 
         # Convert all floats to decimals before saving to DynamoDB
         sub_card = convert_floats_to_decimals(sub_card)
+
+        # Save to DynamoDB
+        table.put_item(Item=sub_card)
 
         return make_response(
             201,
@@ -152,12 +191,17 @@ def main(event, context=None):
                 "message": "Sub-card created successfully",
                 "data": {
                     "sub_card_id": sub_card_id,
-                    "name": sub_card.name,
-                    "color": sub_card.color,
-                    "spending_limit": float(sub_card.spending_limit),
-                    "status": sub_card.status,
-                    "parent_card_id": sub_card.parent_card_id,
-                    "created_at": sub_card.created_at,
+                    "name": sub_card["name"],
+                    "color": sub_card["color"],
+                    "merchant_id": sub_card["merchant_id"],
+                    "duration_days": sub_card["duration_days"],
+                    "start_date": sub_card["start_date"],
+                    "expiration_date": sub_card["expiration_date"],
+                    "spending_limit": float(sub_card["spending_limit"]),
+                    "current_spend": float(sub_card["current_spend"]),
+                    "status": sub_card["status"],
+                    "parent_card_id": sub_card["main_card_id"],
+                    "created_at": sub_card["created_at"],
                 },
             },
         )
