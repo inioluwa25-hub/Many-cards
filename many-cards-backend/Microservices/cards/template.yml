@@ -178,7 +178,7 @@ Resources:
             Method: POST
             RestApiId: !Ref GenerateCardApi
             Auth:
-              Authorizer: None
+              Authorizer: NONE
 
   GetCardFunction:
     Type: AWS::Serverless::Function
