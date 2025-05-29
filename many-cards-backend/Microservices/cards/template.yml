@@ -126,6 +126,7 @@ Resources:
                   - !GetAtt ListAllCardsFunction.Arn
                   - !GetAtt CurrencyConverterFunction.Arn
                   - !GetAtt GetTotalBalanceFunction.Arn
+                  - !GetAtt GetAllSubCardsFunction.Arn
 
   GenerateMainCardFunction:
     Type: AWS::Serverless::Function
@@ -177,6 +178,24 @@ Resources:
           Properties:
             Path: /total-balance
             Method: GET
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  GetAllSubCardsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-get-all-sub-cards-function"
+      Handler: main.handler
+      CodeUri: ./src/get-all-sub-cards/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: Get All Sub Cards on the application
+      Events:
+        GetAllSubCards:
+          Type: Api
+          Properties:
+            Path: /get-all-sub-cards
+            Method: POST
             RestApiId: !Ref GenerateCardApi
             Auth:
               Authorizer: CognitoAuthorizer
@@ -281,6 +300,12 @@ Resources:
       LogGroupName: !Sub "/aws/lambda/${GenerateMainCardFunction}"
       RetentionInDays: 14
 
+  GetAllSubCardsFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${GetAllSubCardsFunction}"
+      RetentionInDays: 14
+
   GetTotalBalanceFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -315,6 +340,9 @@ Outputs:
   GenerateMainCardFunctionArn:
     Description: "Generate Main Card Function ARN"
     Value: !GetAtt GenerateMainCardFunction.Arn
+  GetAllSubCardsFunctionArn:
+    Description: "Get All Sub Cards Function ARN"
+    Value: !GetAtt GetAllSubCardsFunction.Arn
   GetTotalBalanceFunctionArn:
     Description: "Get Total Balance Function ARN"
     Value: !GetAtt GetTotalBalanceFunction.Arn

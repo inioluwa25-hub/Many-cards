@@ -148,7 +148,7 @@ def calculate_total_balance(cards: List[Dict], target_currency: str = "USD") -> 
 
             card_balances.append(
                 {
-                    "card_id": card.get("card_id"),
+                    "card_id": card.get("sk"),
                     "original_balance": card_balance,
                     "original_currency": card_currency,
                     "converted_balance": converted_balance,
@@ -202,7 +202,7 @@ def main(event, context=None):
 
         # Parse request parameters
         query_params = event.get("queryStringParameters") or {}
-        target_currency = query_params.get("currency", "USD").upper()
+        target_currency = query_params.get("currency", "NGN").upper()
 
         # Validate target currency
         if target_currency not in SUPPORTED_CURRENCIES:
