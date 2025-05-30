@@ -1,133 +1,91 @@
 from uuid import uuid4
 from utils import make_response, handle_exceptions, logger
-import random
 import datetime
-from dataclasses import dataclass
+import requests
+from requests.auth import HTTPBasicAuth
 import json
 import boto3
-from decimal import Decimal  # Add this import
-from dataclasses import asdict
+from decimal import Decimal
+from os import getenv
+from aws_lambda_powertools.utilities import parameters
 from botocore.exceptions import ClientError
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("many-cards-prod-main-table")
-kms = boto3.client("kms")
+
+# Environment variables
+STAGE = getenv("STAGE")
+APP_NAME = getenv("APP_NAME")
+
+# Get API credentials from parameter store
+MARQETA_APP_TOKEN = parameters.get_parameter(f"/{APP_NAME}/{STAGE}/MARQETA_APP_TOKEN")
+MARQETA_ACCESS_TOKEN = parameters.get_parameter(
+    f"/{APP_NAME}/{STAGE}/MARQETA_ACCESS_TOKEN"
+)
+MARQETA_CARD_PRODUCT_TOKEN = parameters.get_parameter(
+    f"/{APP_NAME}/{STAGE}/MARQETA_CARD_PRODUCT_TOKEN"
+)
 
 
-@dataclass
-class CardDetails:
-    number: str
-    cvv: str
-    expiry: str
-    card_type: str
-    network: str
+class MarqetaClient:
+    def __init__(self):
+        self.base_url = "https://sandbox-api.marqeta.com/v3"  # Remove trailing slash
+        self.app_token = MARQETA_APP_TOKEN
+        self.access_token = MARQETA_ACCESS_TOKEN
 
+    def create_or_get_user(self, user_data: dict) -> dict:
+        """Create or retrieve a user in Marqeta"""
+        url = f"{self.base_url}/users"
+        headers = {"Content-Type": "application/json"}
+        auth = HTTPBasicAuth(self.app_token, self.access_token)
 
-class CardGenerator:
-    # BIN ranges for different card types and currencies
-    BIN_RANGES = {
-        "NGN": {
-            "visa": ["4", "47"],
-            "mastercard": ["51", "52", "53", "54", "55", "2221", "2222", "2223"],
-        },
-        "USD": {
-            "visa": ["4"],
-            "mastercard": ["51", "52", "53", "54", "55", "2221", "2222", "2223"],
-        },
-        "GBP": {
-            "visa": ["4"],
-            "mastercard": ["51", "52", "53", "54", "55", "2221", "2222", "2223"],
-        },
-    }
-
-    @staticmethod
-    def generate_card(currency: str, card_network: str = "visa") -> CardDetails:
-        """Generate valid payment card details"""
-        # Validate inputs
-        if currency not in CardGenerator.BIN_RANGES:
-            raise ValueError(
-                f"Invalid currency. Must be one of: {list(CardGenerator.BIN_RANGES.keys())}"
-            )
-
-        if card_network not in CardGenerator.BIN_RANGES[currency]:
-            raise ValueError(
-                f"Invalid network for {currency}. Must be one of: {list(CardGenerator.BIN_RANGES[currency].keys())}"
-            )
-
-        # Generate card number
-        bin_prefix = random.choice(CardGenerator.BIN_RANGES[currency][card_network])
-        card_number = CardGenerator._generate_card_number(bin_prefix)
-
-        # Generate other details
-        cvv = CardGenerator._generate_cvv()
-        expiry = CardGenerator._generate_expiry_date()
-
-        return CardDetails(
-            number=card_number,
-            cvv=cvv,
-            expiry=expiry,
-            card_type="virtual",
-            network=card_network,
-        )
-
-    @staticmethod
-    def _generate_card_number(bin_prefix: str, length: int = 16) -> str:
-        """Generate valid card number using Luhn algorithm"""
-        # Generate the base number
-        number = bin_prefix
-        remaining_length = length - len(number) - 1  # -1 for check digit
-
-        # Add random digits
-        number += "".join([str(random.randint(0, 9)) for _ in range(remaining_length)])
-
-        # Calculate check digit
-        check_digit = CardGenerator._calculate_luhn_check_digit(number)
-        return number + str(check_digit)
-
-    @staticmethod
-    def _calculate_luhn_check_digit(partial_number: str) -> int:
-        """Calculate the Luhn check digit"""
-        total = 0
-        for i, digit in enumerate(partial_number[::-1]):
-            n = int(digit)
-            if i % 2 == 0:
-                n *= 2
-                if n > 9:
-                    n -= 9
-            total += n
-        return (10 - (total % 10)) % 10
-
-    @staticmethod
-    def _generate_cvv(length: int = 3) -> str:
-        """Generate random CVV"""
-        return "".join([str(random.randint(0, 9)) for _ in range(length)])
-
-    @staticmethod
-    def _generate_expiry_date(years_valid: int = 3) -> str:
-        """Generate future expiry date (MM/YY format)"""
-        today = datetime.datetime.now()
-        expiry = today + datetime.timedelta(days=365 * years_valid)
-        return expiry.strftime("%m/%y")
-
-
-def _encrypt_card_details(card: CardDetails) -> dict:
-    """Encrypt sensitive card details using KMS"""
-    try:
-        return {
-            "number": kms.encrypt(
-                KeyId="alias/many-cards-data-key", Plaintext=card.number.encode()
-            )["CiphertextBlob"],
-            "cvv": kms.encrypt(
-                KeyId="alias/many-cards-data-key", Plaintext=card.cvv.encode()
-            )["CiphertextBlob"],
+        payload = {
+            "first_name": user_data.get("first_name", "User"),
+            "last_name": user_data.get("last_name", "Name"),
+            "email": user_data.get("email"),
+            "token": user_data.get(
+                "user_token", str(uuid4())
+            ),  # Use provided token or generate one
         }
-    except ClientError as e:
-        raise Exception(f"Encryption failed: {str(e)}")
 
+        try:
+            response = requests.post(url, json=payload, headers=headers, auth=auth)
 
-def _mask_card_number(number: str) -> str:
-    """Mask card number for display (first 4 and last 4 visible)"""
-    return number[:4] + "*" * (len(number) - 8) + number[-4:]
+            if response.status_code == 409:  # User already exists
+                # Get existing user
+                user_token = payload["token"]
+                get_response = requests.get(
+                    f"{self.base_url}/users/{user_token}", headers=headers, auth=auth
+                )
+                get_response.raise_for_status()
+                return get_response.json()
+
+            response.raise_for_status()
+            return response.json()
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Marqeta user API error: {str(e)}")
+            raise Exception("Failed to create/get user with Marqeta")
+
+    def create_card(self, user_token: str, card_data: dict) -> dict:
+        """Create a real, transaction-capable card via Marqeta API"""
+        url = f"{self.base_url}/cards"
+        headers = {"Content-Type": "application/json"}
+        auth = HTTPBasicAuth(self.app_token, self.access_token)
+
+        payload = {
+            "user_token": user_token,
+            "card_product_token": MARQETA_CARD_PRODUCT_TOKEN,
+            **card_data,
+        }
+
+        try:
+            response = requests.post(url, json=payload, headers=headers, auth=auth)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Marqeta card API error: {str(e)}")
+            raise Exception("Failed to create card with Marqeta")
 
 
 @logger.inject_lambda_context(log_event=True)
@@ -146,7 +104,6 @@ def main(event, context=None):
 
         if not isinstance(claims, dict) or not claims:
             logger.error("No valid claims found in event")
-            logger.info(f"Full event structure: {json.dumps(event, indent=2)}")
             return make_response(
                 401,
                 {
@@ -183,8 +140,7 @@ def main(event, context=None):
                 },
             )
 
-        currency = body["currency"].lower()
-        network = body.get("card_network", "visa").lower()
+        currency = body["currency"].upper()  # Keep uppercase for consistency
 
         # Check for existing card of the same currency
         try:
@@ -200,7 +156,7 @@ def main(event, context=None):
 
             # Check if user already has a card with this currency
             for card in existing_cards:
-                if card.get("currency", "").lower() == currency and card.get(
+                if card.get("currency", "").upper() == currency and card.get(
                     "is_active", True
                 ):
                     return make_response(
@@ -228,29 +184,49 @@ def main(event, context=None):
                 },
             )
 
-        # Generate card details
-        card = CardGenerator.generate_card(currency, network)
+        # Create Marqeta client
+        marqeta = MarqetaClient()
 
-        # Encrypt sensitive data
-        encrypted_card = _encrypt_card_details(card)
+        # Create/get user in Marqeta
+        user_response = marqeta.create_or_get_user(
+            {
+                "first_name": claims.get("given_name", "User"),
+                "last_name": claims.get("family_name", "Name"),
+                "email": claims.get("email"),
+                "user_token": user_id,  # Use Cognito user_id as Marqeta user token
+            }
+        )
 
-        # Store in DynamoDB
-        card_id = f"CARD#{str(uuid4())[:8]}"
+        # Create the card
+        card_response = marqeta.create_card(
+            user_token=user_response["token"],
+            card_data={
+                "metadata": {
+                    "currency": currency,
+                    "user_id": user_id,
+                },
+            },
+        )
+
+        # Generate card ID for our system
+        card_id = str(uuid4())[:8]
+
+        # Store card details in DynamoDB
         card_item = {
             "pk": f"USER#{user_id}",
-            "sk": card_id,
+            "sk": f"CARD#{card_id}",
+            "card_id": card_id,
             "user_id": user_id,
-            **asdict(card),
-            "encrypted_card_number": encrypted_card["number"],
-            "encrypted_cvv": encrypted_card["cvv"],
+            "marqeta_card_token": card_response["token"],
+            "marqeta_user_token": user_response["token"],
             "is_active": True,
             "created_at": datetime.datetime.now().isoformat(),
             "balance": Decimal("0.00"),
             "currency": currency,
-            "card_type": card.card_type,
-            "network": card.network,
-            "expiry": card.expiry,
-            "masked_number": _mask_card_number(card.number),
+            "card_type": "virtual",
+            "expiry": card_response["expiration"],
+            "last_four": card_response["last_four"],
+            "card_status": card_response["state"],
         }
 
         table.put_item(Item=card_item)
@@ -261,34 +237,31 @@ def main(event, context=None):
             {
                 "error": False,
                 "success": True,
-                "message": "Card generated successfully",
+                "message": "Card created successfully",
                 "data": {
                     "card_id": card_id,
                     "user_id": user_id,
                     "currency": currency,
-                    "card_type": card.card_type,
-                    "network": card.network,
-                    "masked_number": _mask_card_number(card.number),
-                    "expiry": card.expiry,
+                    "card_type": "virtual",
+                    "masked_number": f"****{card_response['last_four']}",
+                    "expiry": card_response["expiration"],
                     "is_active": True,
                     "created_at": card_item["created_at"],
                     "balance": float(card_item["balance"]),
+                    "card_status": card_response["state"],
+                    "marqeta_card_token": card_response["token"],
                 },
             },
         )
 
-    except ValueError as e:
-        return make_response(
-            400, {"error": True, "success": False, "message": str(e), "data": None}
-        )
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Card creation error: {str(e)}")
         return make_response(
             500,
             {
                 "error": True,
                 "success": False,
-                "message": "Internal server error",
+                "message": "Failed to create card",
                 "data": None,
             },
         )

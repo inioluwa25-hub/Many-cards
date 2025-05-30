@@ -71,6 +71,9 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/CLIENT_ID"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/CLIENT_SECRET"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/EXCHANGE_API_KEY"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/MARQETA_APP_TOKEN"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/MARQETA_ACCESS_TOKEN"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/MARQETA_CARD_PRODUCT_TOKEN"
               
               # KMS permissions
               - Effect: Allow 
