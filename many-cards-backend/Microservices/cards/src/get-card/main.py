@@ -104,9 +104,7 @@ def main(event, context=None):
 
         # Get card from DynamoDB
         try:
-            response = table.get_item(
-                Key={"pk": f"USER#{user_id}", "sk": f"CARD#{card_id}"}
-            )
+            response = table.get_item(Key={"pk": f"USER#{user_id}", "sk": card_id})
         except ClientError as e:
             logger.error(f"DynamoDB error: {str(e)}")
             return make_response(
