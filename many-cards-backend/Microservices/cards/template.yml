@@ -131,7 +131,26 @@ Resources:
                   - !GetAtt GetTotalBalanceFunction.Arn
                   - !GetAtt GetAllSubCardsFunction.Arn
                   - !GetAtt GetSubCardByIdFunction.Arn
+                  - !GetAtt WebhookFunction.Arn
 
+  WebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-marqeta-webhook-function"
+      Handler: main.handler
+      CodeUri: ./src/webhook/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: Marqeta webhook on the application
+      Events:
+        GenerateMainCard:
+          Type: Api
+          Properties:
+            Path: /marqeta-webhook
+            Method: POST
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: NONE
+  
   GenerateMainCardFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -316,6 +335,12 @@ Resources:
     Metadata:
       BuildMethod: python3.10
   
+  WebhookFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${WebhookFunction}"
+      RetentionInDays: 14
+
   GenerateMainCardFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -365,6 +390,9 @@ Resources:
       RetentionInDays: 14
 
 Outputs:
+  WebhookFunctionArn:
+    Description: "Marqeta Webhook Function ARN"
+    Value: !GetAtt WebhookFunction.Arn
   GenerateMainCardFunctionArn:
     Description: "Generate Main Card Function ARN"
     Value: !GetAtt GenerateMainCardFunction.Arn
