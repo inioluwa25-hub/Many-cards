@@ -2,65 +2,47 @@ from decimal import Decimal
 from utils import make_response, handle_exceptions, logger
 import json
 import boto3
+import requests
+from requests.auth import HTTPBasicAuth
 from botocore.exceptions import ClientError
+from os import getenv
+from aws_lambda_powertools.utilities import parameters
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("many-cards-prod-main-table")
 kms = boto3.client("kms")
 
 
-def _decrypt_card_details(encrypted_card_number: bytes, encrypted_cvv: bytes) -> dict:
-    """Decrypt sensitive card details using KMS"""
-    try:
-        # Ensure we have bytes objects
-        if not isinstance(encrypted_card_number, bytes):
-            encrypted_card_number = bytes(encrypted_card_number)
-        if not isinstance(encrypted_cvv, bytes):
-            encrypted_cvv = bytes(encrypted_cvv)
+# Environment variables
+STAGE = getenv("STAGE")
+APP_NAME = getenv("APP_NAME")
 
-        # Decrypt card number
+# Get API credentials from parameter store
+MARQETA_APP_TOKEN = parameters.get_parameter(f"/{APP_NAME}/{STAGE}/MARQETA_APP_TOKEN")
+MARQETA_ACCESS_TOKEN = parameters.get_parameter(
+    f"/{APP_NAME}/{STAGE}/MARQETA_ACCESS_TOKEN"
+)
+
+
+class MarqetaClient:
+    def __init__(self):
+        self.base_url = "https://sandbox-api.marqeta.com/v3"
+        self.app_token = MARQETA_APP_TOKEN
+        self.access_token = MARQETA_ACCESS_TOKEN
+
+    def get_card_details(self, card_token: str) -> dict:
+        """Get full card details including PAN and CVV from Marqeta API"""
+        url = f"{self.base_url}/cards/{card_token}/showpan"
+        headers = {"Content-Type": "application/json"}
+        auth = HTTPBasicAuth(self.app_token, self.access_token)
+
         try:
-            decrypted_number_response = kms.decrypt(
-                CiphertextBlob=encrypted_card_number
-            )
-            decrypted_number = decrypted_number_response["Plaintext"]
-
-            # Handle both bytes and string responses
-            if isinstance(decrypted_number, bytes):
-                decrypted_number = decrypted_number.decode("utf-8")
-        except ClientError as e:
-            logger.error(
-                f"Failed to decrypt card number: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
-            )
-            raise Exception("Failed to decrypt card number")
-        except UnicodeDecodeError as e:
-            logger.error(f"Failed to decode decrypted card number: {str(e)}")
-            raise Exception("Failed to decode decrypted card number")
-
-        # Decrypt CVV
-        try:
-            decrypted_cvv_response = kms.decrypt(CiphertextBlob=encrypted_cvv)
-            decrypted_cvv = decrypted_cvv_response["Plaintext"]
-
-            # Handle both bytes and string responses
-            if isinstance(decrypted_cvv, bytes):
-                decrypted_cvv = decrypted_cvv.decode("utf-8")
-        except ClientError as e:
-            logger.error(
-                f"Failed to decrypt CVV: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
-            )
-            raise Exception("Failed to decrypt CVV")
-        except UnicodeDecodeError as e:
-            logger.error(f"Failed to decode decrypted CVV: {str(e)}")
-            raise Exception("Failed to decode decrypted CVV")
-
-        return {"number": decrypted_number, "cvv": decrypted_cvv}
-
-    except Exception as e:
-        # Safely handle the error without exposing sensitive data
-        error_msg = str(e) if hasattr(e, "__str__") else "Decryption failed"
-        logger.error(f"Decryption error: {error_msg}")
-        raise Exception("Decryption failed")
+            response = requests.get(url, headers=headers, auth=auth)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Marqeta card details API error: {str(e)}")
+            raise Exception("Failed to get card details from Marqeta")
 
 
 @logger.inject_lambda_context(log_event=True)
@@ -122,11 +104,11 @@ def main(event, context=None):
 
         # Get card from DynamoDB
         try:
-            response = table.get_item(Key={"pk": f"USER#{user_id}", "sk": card_id})
-        except ClientError as e:
-            logger.error(
-                f"DynamoDB error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+            response = table.get_item(
+                Key={"pk": f"USER#{user_id}", "sk": f"CARD#{card_id}"}
             )
+        except ClientError as e:
+            logger.error(f"DynamoDB error: {str(e)}")
             return make_response(
                 500,
                 {
@@ -166,52 +148,37 @@ def main(event, context=None):
                 },
             )
 
-        # Validate encrypted data exists
-        encrypted_card_number = card_item.get("encrypted_card_number")
-        encrypted_cvv = card_item.get("encrypted_cvv")
-
-        if not encrypted_card_number or not encrypted_cvv:
-            logger.error(f"Missing encrypted data for card {card_id}")
-            return make_response(
-                500,
-                {
-                    "error": True,
-                    "success": False,
-                    "message": "Card data incomplete",
-                    "data": None,
-                },
-            )
-
-        # Decrypt card details
+        # Get full card details from Marqeta
+        marqeta = MarqetaClient()
         try:
-            decrypted_details = _decrypt_card_details(
-                encrypted_card_number, encrypted_cvv
-            )
+            card_details = marqeta.get_card_details(card_item["marqeta_card_token"])
         except Exception as e:
-            logger.error(f"Decryption failed for card {card_id}: {str(e)}")
+            logger.error(f"Failed to get card details from Marqeta: {str(e)}")
             return make_response(
                 500,
                 {
                     "error": True,
                     "success": False,
-                    "message": "Failed to decrypt card details",
+                    "message": "Failed to retrieve card details",
                     "data": None,
                 },
             )
 
         # Prepare response data
         response_data = {
-            "card_id": card_item.get("sk"),
+            "card_id": card_id,
             "user_id": user_id,
             "currency": card_item.get("currency"),
             "card_type": card_item.get("card_type"),
-            "network": card_item.get("network"),
+            "full_number": card_details.get("pan"),
+            "cvv": card_details.get("cvv_number"),
             "expiry": card_item.get("expiry"),
             "is_active": card_item.get("is_active", False),
             "created_at": card_item.get("created_at"),
             "balance": float(card_item.get("balance", Decimal("0.00"))),
-            "full_number": decrypted_details.get("number"),
-            "cvv": decrypted_details.get("cvv"),
+            "card_status": card_item.get("card_status"),
+            "last_four": card_item.get("last_four"),
+            "marqeta_card_token": card_item.get("marqeta_card_token"),
         }
 
         return make_response(
@@ -225,7 +192,7 @@ def main(event, context=None):
         )
 
     except Exception as e:
-        logger.error(f"Unexpected error in get_card_details: {str(e)}")
+        logger.error(f"Unexpected error in get_card: {str(e)}")
         return make_response(
             500,
             {
