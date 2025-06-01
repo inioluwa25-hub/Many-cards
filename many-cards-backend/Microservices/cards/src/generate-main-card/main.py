@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("many-cards-prod-main-table")
+kms = boto3.client("kms")
 
 # Environment variables
 STAGE = getenv("STAGE")
@@ -86,6 +87,34 @@ class MarqetaClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Marqeta card API error: {str(e)}")
             raise Exception("Failed to create card with Marqeta")
+
+    def get_card_details(self, card_token: str) -> dict:
+        """Get PAN and CVV immediately after card creation (one-time access)"""
+        url = f"{self.base_url}/cards/{card_token}/showpan"
+        headers = {"Content-Type": "application/json"}
+        auth = HTTPBasicAuth(self.app_token, self.access_token)
+
+        try:
+            response = requests.get(url, headers=headers, auth=auth)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Marqeta showpan API error: {str(e)}")
+            raise Exception("Failed to fetch card details")
+
+    def get_card_cvv(self, card_token: str) -> str:
+        """Get CVV for a card (separate from PAN)"""
+        url = f"{self.base_url}/cards/{card_token}/showcvv"
+        headers = {"Content-Type": "application/json"}
+        auth = HTTPBasicAuth(self.app_token, self.access_token)
+
+        try:
+            response = requests.get(url, headers=headers, auth=auth)
+            response.raise_for_status()
+            return response.json().get("cvv_number")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Marqeta showcvv API error: {str(e)}")
+            raise Exception("Failed to fetch CVV")
 
 
 @logger.inject_lambda_context(log_event=True)
@@ -208,6 +237,38 @@ def main(event, context=None):
             },
         )
 
+        # After getting card_response
+        try:
+            # Get PAN
+            pan = card_response.get("pan")  # Already in response
+
+            # Get CVV separately
+            cvv = marqeta.get_card_cvv(card_response["token"])
+
+            # Encrypt both
+            encrypted_pan = (
+                kms.encrypt(
+                    KeyId="alias/many-cards-data-key",
+                    Plaintext=pan.encode(),
+                )["CiphertextBlob"]
+                if pan
+                else None
+            )
+
+            encrypted_cvv = (
+                kms.encrypt(
+                    KeyId="alias/many-cards-data-key",
+                    Plaintext=cvv.encode(),
+                )["CiphertextBlob"]
+                if cvv
+                else None
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to store PAN/CVV: {str(e)}")
+            encrypted_pan = None
+            encrypted_cvv = None
+
         # Generate card ID for our system
         card_id = str(uuid4())[:8]
 
@@ -223,6 +284,8 @@ def main(event, context=None):
             "created_at": datetime.datetime.now().isoformat(),
             "balance": Decimal("0.00"),
             "currency": currency,
+            "encrypted_pan": encrypted_pan,
+            "encrypted_cvv": encrypted_cvv,
             "card_type": "virtual",
             "expiry": card_response["expiration"],
             "last_four": card_response["last_four"],

@@ -132,6 +132,7 @@ Resources:
                   - !GetAtt GetAllSubCardsFunction.Arn
                   - !GetAtt GetSubCardByIdFunction.Arn
                   - !GetAtt WebhookFunction.Arn
+                  - !GetAtt CvvWebhookFunction.Arn
 
   WebhookFunction:
     Type: AWS::Serverless::Function
@@ -146,6 +147,24 @@ Resources:
           Type: Api
           Properties:
             Path: /marqeta-webhook
+            Method: POST
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: NONE
+
+  CvvWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-cvv-webhook-function"
+      Handler: main.handler
+      CodeUri: ./src/webhook/cvv-webhook/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: Cvv webhook on the application
+      Events:
+        GenerateMainCard:
+          Type: Api
+          Properties:
+            Path: /cvv-webhook
             Method: POST
             RestApiId: !Ref GenerateCardApi
             Auth:
@@ -335,6 +354,12 @@ Resources:
     Metadata:
       BuildMethod: python3.10
   
+  CvvWebhookFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CvvWebhookFunction}"
+      RetentionInDays: 14
+
   WebhookFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -390,6 +415,9 @@ Resources:
       RetentionInDays: 14
 
 Outputs:
+  CvvWebhookFunctionArn:
+    Description: "Cvv Webhook Function ARN"
+    Value: !GetAtt CvvWebhookFunction.Arn
   WebhookFunctionArn:
     Description: "Marqeta Webhook Function ARN"
     Value: !GetAtt WebhookFunction.Arn
