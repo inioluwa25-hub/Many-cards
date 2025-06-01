@@ -45,6 +45,15 @@ class MarqetaClient:
             raise Exception("Failed to get card details from Marqeta")
 
 
+def _decrypt_kms_data(encrypted_data):
+    try:
+        response = kms.decrypt(CiphertextBlob=encrypted_data)
+        return response["Plaintext"].decode("utf-8")
+    except ClientError as e:
+        logger.error(f"KMS decryption failed: {str(e)}")
+        raise Exception("Decryption failed")
+
+
 @logger.inject_lambda_context(log_event=True)
 @handle_exceptions
 def main(event, context=None):
@@ -162,14 +171,22 @@ def main(event, context=None):
                 },
             )
 
+        # Decrypt PAN/CVV
+        try:
+            pan = _decrypt_kms_data(card_item["encrypted_pan"])
+            cvv = _decrypt_kms_data(card_item["encrypted_cvv"])
+        except Exception as e:
+            logger.error(f"Failed to decrypt card data: {str(e)}")
+            return make_response(500, {"error": "Card data decryption failed"})
+
         # Prepare response data
         response_data = {
             "card_id": card_id,
             "user_id": user_id,
             "currency": card_item.get("currency"),
             "card_type": card_item.get("card_type"),
-            "full_number": card_details.get("pan"),
-            "cvv": card_details.get("cvv_number"),
+            "full_number": pan,
+            "cvv": cvv,
             "expiry": card_item.get("expiry"),
             "is_active": card_item.get("is_active", False),
             "created_at": card_item.get("created_at"),
