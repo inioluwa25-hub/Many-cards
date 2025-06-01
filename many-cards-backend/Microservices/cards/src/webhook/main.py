@@ -10,7 +10,7 @@ table = dynamodb.Table("many-cards-prod-main-table")
 
 @logger.inject_lambda_context(log_event=True)
 @handle_exceptions
-def handler(event, context):
+def main(event, context):
     try:
         # Verify webhook payload
         body = json.loads(event["body"])
@@ -65,3 +65,9 @@ def handler(event, context):
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
         return {"statusCode": 500, "body": "Internal server error"}
+
+
+@logger.inject_lambda_context(log_event=True)
+@handle_exceptions
+def hanlder(event, context):
+    return main(event, context)
