@@ -2,7 +2,6 @@ from uuid import uuid4
 from utils import make_response, handle_exceptions, logger
 import datetime
 import requests
-from requests.auth import HTTPBasicAuth
 import json
 import boto3
 from decimal import Decimal
@@ -19,102 +18,193 @@ STAGE = getenv("STAGE")
 APP_NAME = getenv("APP_NAME")
 
 # Get API credentials from parameter store
-MARQETA_APP_TOKEN = parameters.get_parameter(f"/{APP_NAME}/{STAGE}/MARQETA_APP_TOKEN")
-MARQETA_ACCESS_TOKEN = parameters.get_parameter(
-    f"/{APP_NAME}/{STAGE}/MARQETA_ACCESS_TOKEN"
-)
-MARQETA_CARD_PRODUCT_TOKEN = parameters.get_parameter(
-    f"/{APP_NAME}/{STAGE}/MARQETA_CARD_PRODUCT_TOKEN"
+SUDO_API_KEY = parameters.get_parameter(f"/{APP_NAME}/{STAGE}/SUDO_SECRET_KEY")
+SUDO_ENVIRONMENT = parameters.get_parameter(
+    f"/{APP_NAME}/{STAGE}/SUDO_ENVIRONMENT", transform="json"
 )
 
 
-class MarqetaClient:
+class SudoClient:
     def __init__(self):
-        self.base_url = "https://sandbox-api.marqeta.com/v3"  # Remove trailing slash
-        self.app_token = MARQETA_APP_TOKEN
-        self.access_token = MARQETA_ACCESS_TOKEN
+        self.environment = SUDO_ENVIRONMENT or "sandbox"
+        self.base_url = (
+            "https://api.sandbox.sudo.cards"
+            if self.environment == "sandbox"
+            else "https://api.sudo.cards"
+        )
+        self.api_key = SUDO_API_KEY
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
 
-    def create_or_get_user(self, user_data: dict) -> dict:
-        """Create or retrieve a user in Marqeta"""
-        url = f"{self.base_url}/users"
-        headers = {"Content-Type": "application/json"}
-        auth = HTTPBasicAuth(self.app_token, self.access_token)
+    def create_or_get_customer(self, user_data: dict) -> dict:
+        """Create or retrieve a customer in Sudo"""
+        url = f"{self.base_url}/customers"
+
+        # Check if customer already exists by searching with email
+        search_url = f"{self.base_url}/customers"
+        search_params = {"email": user_data.get("email")}
+
+        try:
+            # First try to find existing customer
+            search_response = requests.get(
+                search_url, headers=self.headers, params=search_params
+            )
+
+            if search_response.status_code == 200:
+                customers = search_response.json().get("data", [])
+                if customers:
+                    logger.info(f"Found existing customer: {customers[0].get('id')}")
+                    return customers[0]
+
+            # Create new customer if not found
+            payload = {
+                "type": "individual",
+                "name": f"{user_data.get('first_name')} {user_data.get('last_name')}",
+                "email": user_data.get("email"),
+                "phoneNumber": user_data.get("phone_number"),
+                "identity": {
+                    "type": "individual",
+                    "firstName": user_data.get("first_name"),
+                    "lastName": user_data.get("last_name"),
+                    "dateOfBirth": user_data.get("date_of_birth"),
+                    "country": "NG",  # Nigeria
+                },
+                "billingAddress": {
+                    "line1": user_data.get("address"),
+                    "city": user_data.get("city"),
+                    "state": user_data.get("state"),
+                    "country": "NG",
+                    "postalCode": user_data.get("postal_code"),
+                },
+            }
+
+            response = requests.post(url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            customer_data = response.json()
+            logger.info(f"Created new customer: {customer_data.get('id')}")
+            return customer_data
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Sudo customer API error: {str(e)}")
+            if hasattr(e.response, "text"):
+                logger.error(f"Error response: {e.response.text}")
+            raise Exception("Failed to create/get customer with Sudo")
+
+    def create_funding_source(self, customer_id: str, currency: str = "NGN") -> dict:
+        """Create a funding source for the customer"""
+        url = f"{self.base_url}/accounts"
 
         payload = {
-            "first_name": user_data.get("first_name", "User"),
-            "last_name": user_data.get("last_name", "Name"),
-            "email": user_data.get("email"),
-            "token": user_data.get(
-                "user_token", str(uuid4())
-            ),  # Use provided token or generate one
+            "customerId": customer_id,
+            "type": "current",
+            "currency": currency,
+            "accountName": f"Main Account - {currency}",
         }
 
         try:
-            response = requests.post(url, json=payload, headers=headers, auth=auth)
-
-            if response.status_code == 409:  # User already exists
-                # Get existing user
-                user_token = payload["token"]
-                get_response = requests.get(
-                    f"{self.base_url}/users/{user_token}", headers=headers, auth=auth
-                )
-                get_response.raise_for_status()
-                return get_response.json()
-
+            response = requests.post(url, json=payload, headers=self.headers)
             response.raise_for_status()
-            return response.json()
+            funding_source = response.json()
+            logger.info(f"Created funding source: {funding_source.get('id')}")
+            return funding_source
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Sudo funding source API error: {str(e)}")
+            if hasattr(e.response, "text"):
+                logger.error(f"Error response: {e.response.text}")
+            raise Exception("Failed to create funding source with Sudo")
+
+    def get_or_create_funding_source(
+        self, customer_id: str, currency: str = "NGN"
+    ) -> dict:
+        """Get existing funding source or create new one"""
+        try:
+            # Try to get existing funding sources
+            url = f"{self.base_url}/accounts"
+            params = {"customerId": customer_id, "currency": currency}
+
+            response = requests.get(url, headers=self.headers, params=params)
+            response.raise_for_status()
+
+            accounts = response.json().get("data", [])
+            if accounts:
+                logger.info(f"Found existing funding source: {accounts[0].get('id')}")
+                return accounts[0]
+
+            # Create new funding source if none exists
+            return self.create_funding_source(customer_id, currency)
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Marqeta user API error: {str(e)}")
-            raise Exception("Failed to create/get user with Marqeta")
+            logger.error(f"Error getting funding sources: {str(e)}")
+            # Fallback to creating new funding source
+            return self.create_funding_source(customer_id, currency)
 
-    def create_card(self, user_token: str, card_data: dict) -> dict:
-        """Create a real, transaction-capable card via Marqeta API"""
+    def create_card(
+        self, customer_id: str, funding_source_id: str, card_data: dict
+    ) -> dict:
+        """Create a virtual card via Sudo API"""
         url = f"{self.base_url}/cards"
-        headers = {"Content-Type": "application/json"}
-        auth = HTTPBasicAuth(self.app_token, self.access_token)
+
+        currency = card_data.get("currency")
+
+        # Default spending limits based on currency
+        default_limits = [
+            {"amount": 50000, "interval": "daily"},  # 50k NGN daily
+            {"amount": 200000, "interval": "monthly"},  # 200k NGN monthly
+        ]
+
+        if currency == "USD":
+            default_limits = [
+                {"amount": 100, "interval": "daily"},  # $100 daily
+                {"amount": 500, "interval": "monthly"},  # $500 monthly
+            ]
 
         payload = {
-            "user_token": user_token,
-            "card_product_token": MARQETA_CARD_PRODUCT_TOKEN,
-            **card_data,
+            "customerId": customer_id,
+            "fundingSourceId": funding_source_id,
+            "type": "virtual",
+            "brand": "Verve",  # Default to Verve for NGN
+            "currency": currency,
+            "issuerCountry": "NGA",
+            "status": "active",
+            "metadata": json.dumps(card_data.get("metadata", {})),
+            "spendingControls": {
+                "allowedCategories": [],
+                "blockedCategories": [],
+                "channels": {
+                    "atm": False,  # Virtual cards don't support ATM
+                    "pos": False,  # Virtual cards don't support POS
+                    "web": True,
+                    "mobile": True,
+                },
+                "spendingLimits": card_data.get("spending_limits", default_limits),
+            },
         }
 
         try:
-            response = requests.post(url, json=payload, headers=headers, auth=auth)
+            response = requests.post(url, json=payload, headers=self.headers)
             response.raise_for_status()
-            return response.json()
+            card_response = response.json()
+            logger.info(f"Created card: {card_response.get('id')}")
+            return card_response
         except requests.exceptions.RequestException as e:
-            logger.error(f"Marqeta card API error: {str(e)}")
-            raise Exception("Failed to create card with Marqeta")
+            logger.error(f"Sudo card API error: {str(e)}")
+            if hasattr(e.response, "text"):
+                logger.error(f"Error response: {e.response.text}")
+            raise Exception("Failed to create card with Sudo")
 
-    def get_card_details(self, card_token: str) -> dict:
-        """Get PAN and CVV immediately after card creation (one-time access)"""
-        url = f"{self.base_url}/cards/{card_token}/showpan"
-        headers = {"Content-Type": "application/json"}
-        auth = HTTPBasicAuth(self.app_token, self.access_token)
+    def get_card_details(self, card_id: str) -> dict:
+        """Get card details including PAN and CVV"""
+        url = f"{self.base_url}/cards/{card_id}"
 
         try:
-            response = requests.get(url, headers=headers, auth=auth)
+            response = requests.get(url, headers=self.headers)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"Marqeta showpan API error: {str(e)}")
+            logger.error(f"Sudo card details API error: {str(e)}")
             raise Exception("Failed to fetch card details")
-
-    def get_card_cvv(self, card_token: str) -> str:
-        """Get CVV for a card (separate from PAN)"""
-        url = f"{self.base_url}/cards/{card_token}/showcvv"
-        headers = {"Content-Type": "application/json"}
-        auth = HTTPBasicAuth(self.app_token, self.access_token)
-
-        try:
-            response = requests.get(url, headers=headers, auth=auth)
-            response.raise_for_status()
-            return response.json().get("cvv_number")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Marqeta showcvv API error: {str(e)}")
-            raise Exception("Failed to fetch CVV")
 
 
 @logger.inject_lambda_context(log_event=True)
@@ -169,7 +259,20 @@ def main(event, context=None):
                 },
             )
 
-        currency = body["currency"].upper()  # Keep uppercase for consistency
+        currency = body["currency"].upper()
+
+        # Validate supported currencies for Sudo
+        supported_currencies = ["NGN", "USD", "GBP"]  # Add more as supported by Sudo
+        if currency not in supported_currencies:
+            return make_response(
+                400,
+                {
+                    "error": True,
+                    "success": False,
+                    "message": f"Unsupported currency: {currency}. Supported: {', '.join(supported_currencies)}",
+                    "data": None,
+                },
+            )
 
         # Check for existing card of the same currency
         try:
@@ -213,59 +316,69 @@ def main(event, context=None):
                 },
             )
 
-        # Create Marqeta client
-        marqeta = MarqetaClient()
+        # Create Sudo client
+        sudo = SudoClient()
 
-        # Create/get user in Marqeta
-        user_response = marqeta.create_or_get_user(
+        # Create/get customer in Sudo
+        customer_response = sudo.create_or_get_customer(
             {
-                "first_name": claims.get("given_name", "User"),
-                "last_name": claims.get("family_name", "Name"),
+                "first_name": claims.get("given_name"),
+                "last_name": claims.get("family_name"),
                 "email": claims.get("email"),
-                "user_token": user_id,  # Use Cognito user_id as Marqeta user token
+                "phone": body.get("phone_number"),
+                "date_of_birth": body.get("birthdate"),
+                "address": body.get("address"),
+                "city": body.get("city", "Lagos"),
+                "state": body.get("state", "Lagos"),
+                "postal_code": body.get("postal_code"),
             }
         )
 
+        customer_id = customer_response["id"]
+
+        # Get or create funding source
+        funding_source = sudo.get_or_create_funding_source(customer_id, currency)
+        funding_source_id = funding_source["id"]
+
         # Create the card
-        card_response = marqeta.create_card(
-            user_token=user_response["token"],
+        card_response = sudo.create_card(
+            customer_id=customer_id,
+            funding_source_id=funding_source_id,
             card_data={
+                "currency": currency,
                 "metadata": {
-                    "currency": currency,
                     "user_id": user_id,
+                    "created_via": "lambda",
+                    "environment": sudo.environment,
                 },
+                "spending_limits": body.get("spending_limits"),  # Allow custom limits
             },
         )
 
-        # After getting card_response
+        # Extract card details
+        card_number = card_response.get("number")  # Full PAN
+        cvv = card_response.get("cvv")
+        last_four = card_number[-4:] if card_number else "****"
+
+        # Encrypt sensitive data
         try:
-            # Get PAN
-            pan = card_response.get("pan")  # Already in response
+            encrypted_pan = None
+            encrypted_cvv = None
 
-            # Get CVV separately
-            cvv = marqeta.get_card_cvv(card_response["token"])
-
-            # Encrypt both
-            encrypted_pan = (
-                kms.encrypt(
+            if card_number:
+                encrypted_pan = kms.encrypt(
                     KeyId="alias/many-cards-data-key",
-                    Plaintext=pan.encode(),
+                    Plaintext=card_number.encode(),
                 )["CiphertextBlob"]
-                if pan
-                else None
-            )
 
-            encrypted_cvv = (
-                kms.encrypt(
+            if cvv:
+                encrypted_cvv = kms.encrypt(
                     KeyId="alias/many-cards-data-key",
                     Plaintext=cvv.encode(),
                 )["CiphertextBlob"]
-                if cvv
-                else None
-            )
 
         except Exception as e:
-            logger.error(f"Failed to store PAN/CVV: {str(e)}")
+            logger.error(f"Failed to encrypt PAN/CVV: {str(e)}")
             encrypted_pan = None
             encrypted_cvv = None
 
@@ -278,8 +391,9 @@ def main(event, context=None):
             "sk": f"CARD#{card_id}",
             "card_id": card_id,
             "user_id": user_id,
-            "marqeta_card_token": card_response["token"],
-            "marqeta_user_token": user_response["token"],
+            "sudo_card_id": card_response["id"],
+            "sudo_customer_id": customer_id,
+            "sudo_funding_source_id": funding_source_id,
             "is_active": True,
             "created_at": datetime.datetime.now().isoformat(),
             "balance": Decimal("0.00"),
@@ -287,14 +401,16 @@ def main(event, context=None):
             "encrypted_pan": encrypted_pan,
             "encrypted_cvv": encrypted_cvv,
             "card_type": "virtual",
-            "expiry": card_response["expiration"],
-            "last_four": card_response["last_four"],
-            "card_status": card_response["state"],
+            "expiry": card_response.get("expirationDate", ""),
+            "last_four": last_four,
+            "card_status": card_response.get("status", "active"),
+            "brand": card_response.get("brand", "Verve"),
+            "issuer_country": card_response.get("issuerCountry", "NGA"),
         }
 
         table.put_item(Item=card_item)
 
-        # Prepare success response
+        # Prepare success response (don't return sensitive data)
         return make_response(
             201,
             {
@@ -306,13 +422,18 @@ def main(event, context=None):
                     "user_id": user_id,
                     "currency": currency,
                     "card_type": "virtual",
-                    "masked_number": f"****{card_response['last_four']}",
-                    "expiry": card_response["expiration"],
+                    "masked_number": f"****{last_four}",
+                    "expiry": card_response.get("expirationDate", ""),
+                    "brand": card_response.get("brand", "Verve"),
                     "is_active": True,
                     "created_at": card_item["created_at"],
                     "balance": float(card_item["balance"]),
-                    "card_status": card_response["state"],
-                    "marqeta_card_token": card_response["token"],
+                    "card_status": card_response.get("status", "active"),
+                    "sudo_card_id": card_response["id"],
+                    "issuer_country": card_response.get("issuerCountry", "NGA"),
+                    "spending_limits": card_response.get("spendingControls", {}).get(
+                        "spendingLimits", []
+                    ),
                 },
             },
         )
@@ -325,7 +446,7 @@ def main(event, context=None):
                 "error": True,
                 "success": False,
                 "message": "Failed to create card",
-                "data": None,
+                "data": {"error_details": str(e)},
             },
         )
 
