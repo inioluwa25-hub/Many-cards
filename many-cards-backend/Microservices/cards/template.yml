@@ -76,6 +76,7 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/MARQETA_CARD_PRODUCT_TOKEN"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/SUDO_SECRET_KEY"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/SUDO_ENVIRONMENT"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/many-cards/${Stage}/PAYSTACK_SECRET_KEY"
               
               # KMS permissions
               - Effect: Allow 
@@ -135,6 +136,25 @@ Resources:
                   - !GetAtt GetSubCardByIdFunction.Arn
                   - !GetAtt WebhookFunction.Arn
                   - !GetAtt CvvWebhookFunction.Arn
+                  - !GetAtt FundAccountFunction.Arn
+
+  FundAccountFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-${Stage}-${ServiceName}-fund-account-function"
+      Handler: main.handler
+      CodeUri: ./src/fund-account/
+      Role: !GetAtt GenerateCardServiceRole.Arn
+      Description: Fund account on the application
+      Events:
+        GenerateMainCard:
+          Type: Api
+          Properties:
+            Path: /fund-account
+            Method: POST
+            RestApiId: !Ref GenerateCardApi
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   WebhookFunction:
     Type: AWS::Serverless::Function
@@ -356,6 +376,12 @@ Resources:
     Metadata:
       BuildMethod: python3.10
   
+  FundAccountFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FundAccountFunction}"
+      RetentionInDays: 14
+
   CvvWebhookFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -417,6 +443,9 @@ Resources:
       RetentionInDays: 14
 
 Outputs:
+  FundAccountFunctionArn:
+    Description: "Fund Account Function ARN"
+    Value: !GetAtt FundAccountFunction.Arn
   CvvWebhookFunctionArn:
     Description: "Cvv Webhook Function ARN"
     Value: !GetAtt CvvWebhookFunction.Arn
