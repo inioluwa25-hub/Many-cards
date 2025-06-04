@@ -30,105 +30,36 @@ class SudoClient:
             "Accept": "application/json",
         }
 
-    def create_customer(self, user_data: dict) -> dict:
-        """Create a customer in Sudo sandbox"""
-        url = f"{self.base_url}/customers"
-        payload = {
-            "type": "individual",
-            "status": "active",
-            "individual": {
-                "firstName": user_data.get("first_name"),
-                "lastName": user_data.get("last_name"),
-            },
-            "billingAddress": {
-                "line1": "123 Main St",
-                "city": "Lagos",
-                "state": "Lagos",
-                "postalCode": "100001",
-                "country": "NG",
-            },
-        }
+    def generate_test_card(self) -> dict:
+        """Generate a test card using Sudo's simulator endpoint"""
+        url = f"{self.base_url}/cards/simulator/generate"
 
         try:
-            response = requests.post(url, json=payload, headers=self.headers)
-            response.raise_for_status()
-            return response.json()
+            logger.info("Generating test card using simulator")
+            response = requests.get(url, headers=self.headers, timeout=10)
+
+            logger.info(
+                f"Test card generation response: {response.status_code} - {response.text}"
+            )
+
+            if response.status_code == 200:
+                card_data = response.json()
+                logger.info(f"Generated test card: {card_data}")
+                return card_data
+            else:
+                error_msg = (
+                    f"Test card generation failed with status {response.status_code}"
+                )
+                if response.text:
+                    error_msg += f": {response.text}"
+                raise Exception(error_msg)
+
         except requests.exceptions.RequestException as e:
-            logger.error(f"Sudo customer creation error: {str(e)}")
-            raise Exception("Failed to create customer")
-
-    def create_account(self, customer_id: str, currency: str = "NGN") -> dict:
-        """Create a wallet account in Sudo sandbox"""
-        url = f"{self.base_url}/accounts"
-        payload = {
-            "customerId": customer_id,
-            "type": "wallet",
-            "currency": currency,
-            "status": "active",
-        }
-
-        try:
-            response = requests.post(url, json=payload, headers=self.headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Sudo account creation error: {str(e)}")
-            raise Exception("Failed to create account")
-
-    def fund_account(self, account_id: str, amount: float, currency: str) -> dict:
-        """Fund an account in Sudo sandbox (simulated funding)"""
-        url = f"{self.base_url}/simulator/accounts/{account_id}/credit"
-        payload = {
-            "amount": amount,
-            "currency": currency,
-            "description": "Initial funding",
-        }
-
-        try:
-            response = requests.post(url, json=payload, headers=self.headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Sudo account funding error: {str(e)}")
-            raise Exception("Failed to fund account")
-
-    def create_card(self, customer_id: str, account_id: str, currency: str) -> dict:
-        """Create a virtual card in Sudo sandbox"""
-        url = f"{self.base_url}/cards"
-        payload = {
-            "customerId": customer_id,
-            "accountId": account_id,
-            "type": "virtual",
-            "currency": currency,
-            "brand": "Verve",
-            "status": "active",
-            "spendingControls": {
-                "spendingLimits": [
-                    {"amount": 500000, "interval": "daily"},
-                    {"amount": 1500000, "interval": "monthly"},
-                ]
-            },
-        }
-
-        try:
-            response = requests.post(url, json=payload, headers=self.headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Sudo card creation error: {str(e)}")
-            raise Exception("Failed to create card")
-
-    def get_card_details(self, card_id: str) -> dict:
-        """Get card details including PAN and CVV"""
-        url = f"{self.base_url}/cards/{card_id}/show"
-
-        try:
-            response = requests.get(url, headers=self.headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Sudo card details error: {str(e)}")
-            raise Exception("Failed to get card details")
+            logger.error(f"Test card generation error: {str(e)}")
+            if hasattr(e, "response") and e.response is not None:
+                logger.error(f"Error response status: {e.response.status_code}")
+                logger.error(f"Error response text: {e.response.text}")
+            raise Exception(f"Failed to generate test card: {str(e)}")
 
 
 @logger.inject_lambda_context(log_event=True)
@@ -159,7 +90,7 @@ def main(event, context=None):
                 400, {"error": True, "message": "Invalid JSON payload"}
             )
 
-        # Validate currency
+        # Validate currency (for our internal tracking, though test cards may have their own)
         currency = body.get("currency", "NGN").upper()
         if currency not in ["NGN", "USD", "GBP"]:
             return make_response(
@@ -179,10 +110,15 @@ def main(event, context=None):
                     ":sk_prefix": "CARD#",
                 },
             )
-            if any(
-                card.get("currency") == currency and card.get("is_active")
+
+            # Count active cards for this currency
+            active_cards = [
+                card
                 for card in response.get("Items", [])
-            ):
+                if card.get("currency") == currency and card.get("is_active")
+            ]
+
+            if active_cards:
                 return make_response(
                     400,
                     {
@@ -196,54 +132,79 @@ def main(event, context=None):
                 500, {"error": True, "message": "Error checking existing cards"}
             )
 
-        # Initialize Sudo client
+        # Create Sudo client and generate test card
         sudo = SudoClient()
 
-        # 1. Create customer
-        customer = sudo.create_customer(
-            {
-                "first_name": claims.get("given_name", "User"),
-                "last_name": claims.get("family_name", "Name"),
-            }
-        )
-        customer_id = customer["id"]
+        try:
+            # Generate test card directly
+            test_card = sudo.generate_test_card()
 
-        # 2. Create account
-        account = sudo.create_account(customer_id, currency)
-        account_id = account["id"]
+            # Extract card details from test card response
+            # The exact field names may vary based on Sudo's API response structure
+            pan = (
+                test_card.get("pan")
+                or test_card.get("number")
+                or test_card.get("cardNumber")
+            )
+            cvv = (
+                test_card.get("cvv")
+                or test_card.get("cvc")
+                or test_card.get("securityCode")
+            )
+            expiry_month = test_card.get("expiryMonth") or test_card.get("expMonth")
+            expiry_year = test_card.get("expiryYear") or test_card.get("expYear")
 
-        # 3. Fund account (sandbox simulation)
-        initial_funding = float(
-            body.get("initial_funding", 1000 if currency == "NGN" else 10)
-        )
-        sudo.fund_account(account_id, initial_funding, currency)
+            # Format expiry date
+            if expiry_month and expiry_year:
+                expiry = f"{expiry_month:02d}/{str(expiry_year)[-2:]}"  # MM/YY format
+            else:
+                expiry = test_card.get("expiry", "12/25")  # fallback
 
-        # 4. Create card
-        card = sudo.create_card(customer_id, account_id, currency)
-        card_id = card["id"]
+            # Generate card ID if not provided
+            card_id = test_card.get("id", str(uuid4()))
 
-        # 5. Get card details (PAN/CVV)
-        card_details = sudo.get_card_details(card_id)
-        pan = card_details.get("pan")
-        cvv = card_details.get("cvv")
-        expiry = card_details.get("expiry")
+            # Get card brand/type from test card or set default
+            brand = test_card.get("brand", "Verve")
+            card_type = test_card.get("type", "virtual")
+
+            # Set default test balance
+            initial_funding = float(body.get("initial_funding", 1000))
+
+            logger.info(
+                f"Generated test card with PAN ending: {pan[-4:] if pan else 'N/A'}"
+            )
+
+        except Exception as e:
+            logger.error(f"Test card generation failed: {str(e)}")
+            return make_response(
+                500,
+                {
+                    "error": True,
+                    "success": False,
+                    "message": "Failed to generate test card",
+                    "data": {"error_details": str(e)},
+                },
+            )
 
         # Encrypt sensitive data
-        encrypted_pan = (
-            kms.encrypt(KeyId="alias/many-cards-data-key", Plaintext=pan.encode())[
-                "CiphertextBlob"
-            ]
-            if pan
-            else None
-        )
+        encrypted_pan = None
+        encrypted_cvv = None
 
-        encrypted_cvv = (
-            kms.encrypt(KeyId="alias/many-cards-data-key", Plaintext=cvv.encode())[
-                "CiphertextBlob"
-            ]
-            if cvv
-            else None
-        )
+        if pan:
+            try:
+                encrypted_pan = kms.encrypt(
+                    KeyId="alias/many-cards-data-key", Plaintext=pan.encode()
+                )["CiphertextBlob"]
+            except Exception as e:
+                logger.error(f"Failed to encrypt PAN: {str(e)}")
+
+        if cvv:
+            try:
+                encrypted_cvv = kms.encrypt(
+                    KeyId="alias/many-cards-data-key", Plaintext=cvv.encode()
+                )["CiphertextBlob"]
+            except Exception as e:
+                logger.error(f"Failed to encrypt CVV: {str(e)}")
 
         # Generate internal card ID
         internal_card_id = str(uuid4())[:8]
@@ -255,24 +216,39 @@ def main(event, context=None):
             "card_id": internal_card_id,
             "user_id": user_id,
             "sudo_card_id": card_id,
-            "sudo_customer_id": customer_id,
-            "sudo_account_id": account_id,
+            "sudo_customer_id": "test_customer",  # Not needed for test cards
+            "sudo_account_id": "test_account",  # Not needed for test cards
             "is_active": True,
             "created_at": datetime.datetime.now().isoformat(),
             "balance": Decimal(str(initial_funding)),
             "currency": currency,
             "encrypted_pan": encrypted_pan,
             "encrypted_cvv": encrypted_cvv,
-            "card_type": "virtual",
+            "card_type": card_type,
             "expiry": expiry,
             "last_four": pan[-4:] if pan else "****",
             "card_status": "active",
-            "brand": "Verve",
+            "brand": brand,
             "issuer_country": "NGA",
             "initial_funding": Decimal(str(initial_funding)),
+            "is_test_card": True,  # Mark as test card
+            "test_card_data": test_card,  # Store original test card response for reference
         }
 
-        table.put_item(Item=card_item)
+        try:
+            table.put_item(Item=card_item)
+            logger.info(f"Successfully stored card {internal_card_id} in DynamoDB")
+        except Exception as e:
+            logger.error(f"Failed to store card in DynamoDB: {str(e)}")
+            return make_response(
+                500,
+                {
+                    "error": True,
+                    "success": False,
+                    "message": "Failed to store card data",
+                    "data": {"error_details": str(e)},
+                },
+            )
 
         # Return success response
         return make_response(
@@ -280,15 +256,17 @@ def main(event, context=None):
             {
                 "error": False,
                 "success": True,
-                "message": "Card created successfully",
+                "message": "Test card created successfully",
                 "data": {
                     "card_id": internal_card_id,
                     "currency": currency,
                     "masked_number": f"****{pan[-4:]}" if pan else "****",
                     "expiry": expiry,
                     "balance": float(initial_funding),
+                    "brand": brand,
+                    "card_type": card_type,
+                    "is_test_card": True,
                     "sudo_card_id": card_id,
-                    "sudo_account_id": account_id,
                 },
             },
         )
@@ -296,7 +274,13 @@ def main(event, context=None):
     except Exception as e:
         logger.error(f"Card creation error: {str(e)}")
         return make_response(
-            500, {"error": True, "message": "Failed to create card", "details": str(e)}
+            500,
+            {
+                "error": True,
+                "success": False,
+                "message": "Failed to create card",
+                "details": str(e),
+            },
         )
 
 
