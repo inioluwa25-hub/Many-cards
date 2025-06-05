@@ -2,47 +2,16 @@ from decimal import Decimal
 from utils import make_response, handle_exceptions, logger
 import json
 import boto3
-import requests
-from requests.auth import HTTPBasicAuth
 from botocore.exceptions import ClientError
 from os import getenv
-from aws_lambda_powertools.utilities import parameters
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("many-cards-prod-main-table")
 kms = boto3.client("kms")
 
-
 # Environment variables
 STAGE = getenv("STAGE")
 APP_NAME = getenv("APP_NAME")
-
-# Get API credentials from parameter store
-MARQETA_APP_TOKEN = parameters.get_parameter(f"/{APP_NAME}/{STAGE}/MARQETA_APP_TOKEN")
-MARQETA_ACCESS_TOKEN = parameters.get_parameter(
-    f"/{APP_NAME}/{STAGE}/MARQETA_ACCESS_TOKEN"
-)
-
-
-class MarqetaClient:
-    def __init__(self):
-        self.base_url = "https://sandbox-api.marqeta.com/v3"
-        self.app_token = MARQETA_APP_TOKEN
-        self.access_token = MARQETA_ACCESS_TOKEN
-
-    def get_card_details(self, card_token: str) -> dict:
-        """Get full card details including PAN and CVV from Marqeta API"""
-        url = f"{self.base_url}/cards/{card_token}/showpan"
-        headers = {"Content-Type": "application/json"}
-        auth = HTTPBasicAuth(self.app_token, self.access_token)
-
-        try:
-            response = requests.get(url, headers=headers, auth=auth)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Marqeta card details API error: {str(e)}")
-            raise Exception("Failed to get card details from Marqeta")
 
 
 def _decrypt_kms_data(encrypted_data):
@@ -97,10 +66,10 @@ def main(event, context=None):
                 },
             )
 
-        # Get card_id from request body
+        # Get card_id from path parameters or body
         card_id = body.get("card_id")
         if not card_id:
-            logger.error("Missing card_id in request body")
+            logger.error("Missing card_id in request")
             return make_response(
                 400,
                 {
@@ -113,7 +82,12 @@ def main(event, context=None):
 
         # Get card from DynamoDB
         try:
-            response = table.get_item(Key={"pk": f"USER#{user_id}", "sk": card_id})
+            response = table.get_item(
+                Key={
+                    "pk": f"USER#{user_id}",
+                    "sk": card_id,  # Match your create_card format
+                }
+            )
         except ClientError as e:
             logger.error(f"DynamoDB error: {str(e)}")
             return make_response(
@@ -155,46 +129,59 @@ def main(event, context=None):
                 },
             )
 
-        # Get full card details from Marqeta
-        marqeta = MarqetaClient()
-        try:
-            card_details = marqeta.get_card_details(card_item["marqeta_card_token"])
-        except Exception as e:
-            logger.error(f"Failed to get card details from Marqeta: {str(e)}")
-            return make_response(
-                500,
-                {
-                    "error": True,
-                    "success": False,
-                    "message": "Failed to retrieve card details",
-                    "data": None,
-                },
-            )
-
-        # Decrypt PAN/CVV
-        try:
-            pan = _decrypt_kms_data(card_item["encrypted_pan"])
-            cvv = _decrypt_kms_data(card_item["encrypted_cvv"])
-        except Exception as e:
-            logger.error(f"Failed to decrypt card data: {str(e)}")
-            return make_response(500, {"error": "Card data decryption failed"})
-
         # Prepare response data
         response_data = {
             "card_id": card_id,
             "user_id": user_id,
+            "sudo_card_id": card_item.get("sudo_card_id"),
+            "sudo_account_id": card_item.get("sudo_account_id"),
             "currency": card_item.get("currency"),
             "card_type": card_item.get("card_type"),
-            "full_number": pan,
-            "cvv": cvv,
             "expiry": card_item.get("expiry"),
             "is_active": card_item.get("is_active", False),
             "created_at": card_item.get("created_at"),
             "balance": float(card_item.get("balance", Decimal("0.00"))),
             "card_status": card_item.get("card_status"),
             "last_four": card_item.get("last_four"),
-            "marqeta_card_token": card_item.get("marqeta_card_token"),
+            "brand": card_item.get("brand"),
+            "is_test_card": card_item.get("is_test_card", False),
+            "issuer_country": card_item.get("issuer_country"),
         }
+
+        # Handle sensitive data based on card type
+        try:
+            is_test_card = card_item.get("is_test_card", False)
+
+            if is_test_card and card_item.get("test_card_data"):
+                # For test cards, get data from test_card_data
+                test_data = card_item["test_card_data"].get("data", {})
+                if test_data:
+                    response_data["full_number"] = test_data.get("number")
+                    response_data["cvv"] = test_data.get("cvv2")
+
+                    # Handle expiry date formatting
+                    expiry_month = test_data.get("expiryMonth")
+                    expiry_year = test_data.get("expiryYear")
+                    if expiry_month and expiry_year:
+                        # Format as MM/YY
+                        expiry_year_short = (
+                            str(expiry_year)[-2:]
+                            if len(str(expiry_year)) == 4
+                            else str(expiry_year)
+                        )
+                        response_data["expiry"] = f"{expiry_month}/{expiry_year_short}"
+            else:
+                # For production cards, decrypt encrypted data
+                if card_item.get("encrypted_pan"):
+                    response_data["full_number"] = _decrypt_kms_data(
+                        card_item["encrypted_pan"]
+                    )
+                if card_item.get("encrypted_cvv"):
+                    response_data["cvv"] = _decrypt_kms_data(card_item["encrypted_cvv"])
+
+        except Exception as e:
+            logger.warning(f"Partial data retrieval failure: {str(e)}")
+            # Continue without sensitive data rather than failing
 
         return make_response(
             200,
